@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DIY File Sender</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f4f4f9; }
+        .view { display: none; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }
+        .active { display: block; }
+        input[type="text"] { width: calc(100% - 20px); padding: 10px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        
+        /* File Tiles */
+        .tile-container { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
+        .file-tile { background: #e9ecef; padding: 10px; border-radius: 4px; display: flex; align-items: center; gap: 10px; font-size: 14px; }
+        .file-tile span.x-btn { color: red; font-weight: bold; cursor: pointer; }
+        
+        /* Overlay Modal */
+        .overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 1000; }
+        .modal { background: white; padding: 20px; border-radius: 8px; max-width: 400px; }
+        
+        /* Target Search */
+        .target-item { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #eee; align-items: center; cursor: pointer; }
+        .target-item:hover { background: #f9f9f9; }
+        
+        /* Tabs & Inbox */
+        .tabs { margin-bottom: 20px; display: flex; gap: 10px; }
+        .inbox-item { border: 1px solid #ccc; margin-bottom: 10px; padding: 10px; border-radius: 4px; }
+        .dropdown { display: none; margin-top: 10px; background: #f9f9f9; padding: 10px; }
+        .file-link { display: block; margin-bottom: 5px; color: #007bff; text-decoration: none; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <div id="view-connect" class="view active">
+        <h2>Hubungkan ke Server</h2>
+        <p>Masukkan URL Quick Tunnel Cloudflare Anda:</p>
+        <input type="text" id="serverUrl" placeholder="https://xxxx-cloudflare.trycloudflare.com">
+        <button id="btnConnect" disabled>Hubungkan</button>
+        <p id="connStatus"></p>
+    </div>
+
+    <div id="view-profile" class="view">
+        <h2>Buat Profil</h2>
+        <input type="text" id="username" placeholder="Masukkan Username Anda">
+        <button id="btnSetProfile">Set Username</button>
+    </div>
+
+    <div id="view-home" class="view">
+        <div class="tabs">
+            <button onclick="switchTab('send')">Kirim File</button>
+            <button onclick="switchTab('inbox')">Inbox</button>
+        </div>
+        <hr>
+
+        <div id="tab-send">
+            <h3>Tambahkan File</h3>
+            <input type="file" id="fileInput" multiple style="margin-bottom: 15px;">
+            <div class="tile-container" id="fileTiles"></div>
+            <button id="btnNextToSearch" disabled>Next</button>
+        </div>
+
+        <div id="tab-inbox" style="display: none;">
+            <h3>Inbox Anda</h3>
+            <div id="inboxList"></div>
+        </div>
+    </div>
+
+    <div id="view-search" class="view">
+        <h2>Pilih Penerima</h2>
+        <input type="text" id="searchInput" placeholder="Cari nama atau ID penerima...">
+        <div id="searchResults" style="margin-bottom: 15px;"></div>
+        <p style="font-weight: bold;">Target dipilih: <span id="targetCount">0</span></p>
+        <button onclick="changeView('view-home')">Kembali</button>
+        <button id="btnSendFiles" disabled>Kirim File!</button>
+    </div>
+
+    <div id="duplicateModal" class="overlay">
+        <div class="modal">
+            <h3>File Duplikat Terdeteksi!</h3>
+            <p>File berikut memiliki nama yang sama dengan yang sudah ada di daftar:</p>
+            <ul id="duplicateList"></ul>
+            <button onclick="resolveDuplicate(false)">Batal</button>
+            <button onclick="resolveDuplicate(true)">Tambahkan Saja</button>
+        </div>
+    </div>
+
+<script>
+    let SERVER_URL = '';
+    let userProfile = null;
+    let selectedFiles = []; // File objek murni
+    let pendingDuplicateFiles = [];
+    let selectedTargets = new Set();
+
+    // Utilitas DOM
+    const el = id => document.getElementById(id);
+    const changeView = id => { document.querySelectorAll('.view').forEach(v => v.classList.remove('active')); el(id).classList.add('active'); };
+    const switchTab = tab => { el('tab-send').style.display = tab==='send'?'block':'none'; el('tab-inbox').style.display = tab==='inbox'?'block':'none'; if(tab==='inbox') loadInbox(); };
+
+    // 1. Logika Koneksi Server
+    el('serverUrl').addEventListener('input', (e) => el('btnConnect').disabled = !e.target.value.trim());
+    el('btnConnect').addEventListener('click', async () => {
+        SERVER_URL = el('serverUrl').value.trim().replace(/\/$/, "");
+        el('connStatus').innerText = "Menghubungkan...";
+        try {
+            const res = await fetch(SERVER_URL + '/ping');
+            if (res.ok) checkProfile();
+        } catch (e) {
+            el('connStatus').innerText = "Gagal terhubung. Periksa URL.";
+        }
+    });
+
+    // 2. Logika Profil
+    function checkProfile() {
+        const localData = localStorage.getItem('diy_profile');
+        if (localData) {
+            userProfile = JSON.parse(localData);
+            changeView('view-home');
+        } else {
+            changeView('view-profile');
+        }
+    }
+
+    function generateID() {
+        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        let id = '';
+        for (let i = 0; i < 10; i++) id += chars.charAt(Math.floor(Math.random() * chars.length));
+        return id;
+    }
+
+    el('btnSetProfile').addEventListener('click', async () => {
+        const uname = el('username').value.trim();
+        if (!uname) return;
+        const profile = { username: uname, id: generateID() };
+        
+        await fetch(SERVER_URL + '/register', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(profile)
+        });
+        localStorage.setItem('diy_profile', JSON.stringify(profile));
+        userProfile = profile;
+        changeView('view-home');
+    });
+
+    // 3. Logika Tambah File & Duplikat
+    el('fileInput').addEventListener('change', (e) => {
+        const newFiles = Array.from(e.target.files);
+        pendingDuplicateFiles = [];
+        const normalFiles = [];
+
+        newFiles.forEach(nf => {
+            if (selectedFiles.some(sf => sf.name === nf.name)) {
+                pendingDuplicateFiles.push(nf);
+            } else {
+                normalFiles.push(nf);
+            }
+        });
+
+        selectedFiles = [...selectedFiles, ...normalFiles];
+        
+        if (pendingDuplicateFiles.length > 0) {
+            el('duplicateList').innerHTML = pendingDuplicateFiles.map(f => `<li>${f.name}</li>`).join('');
+            el('duplicateModal').style.display = 'flex';
+        } else {
+            renderFileTiles();
+        }
+        el('fileInput').value = ''; // Reset input
+    });
+
+    function resolveDuplicate(addAnyway) {
+        if (addAnyway) selectedFiles = [...selectedFiles, ...pendingDuplicateFiles];
+        pendingDuplicateFiles = [];
+        el('duplicateModal').style.display = 'none';
+        renderFileTiles();
+    }
+
+    function renderFileTiles() {
+        const container = el('fileTiles');
+        container.innerHTML = '';
+        selectedFiles.forEach((file, index) => {
+            const tile = document.createElement('div');
+            tile.className = 'file-tile';
+            tile.innerHTML = `<span>${file.name}</span> <span class="x-btn" onclick="removeFile(${index})">✖</span>`;
+            container.appendChild(tile);
+        });
+        el('btnNextToSearch').disabled = selectedFiles.length === 0;
+    }
+
+    window.removeFile = (idx) => { selectedFiles.splice(idx, 1); renderFileTiles(); };
+
+    // 4. Logika Pencarian & Target
+    el('btnNextToSearch').addEventListener('click', () => { changeView('view-search'); });
+
+    el('searchInput').addEventListener('input', async (e) => {
+        const q = e.target.value.trim();
+        if (!q) { el('searchResults').innerHTML = ''; return; }
+        
+        const res = await fetch(`${SERVER_URL}/search?q=${q}`);
+        const users = await res.json();
+        
+        const resDiv = el('searchResults');
+        resDiv.innerHTML = '';
+        users.forEach(u => {
+            if (u.id === userProfile.id) return; // Jangan tampilkan diri sendiri
+            const isSelected = selectedTargets.has(u.id);
+            const div = document.createElement('div');
+            div.className = 'target-item';
+            div.innerHTML = `
+                <div><b>${u.username}</b> <br><small>ID: ${u.id}</small></div>
+                <div>${isSelected ? '✅' : '<button>Pilih</button>'}</div>
+            `;
+            div.onclick = () => toggleTarget(u.id);
+            resDiv.appendChild(div);
+        });
+    });
+
+    function toggleTarget(id) {
+        if (selectedTargets.has(id)) selectedTargets.delete(id);
+        else selectedTargets.add(id);
+        el('targetCount').innerText = selectedTargets.size;
+        el('btnSendFiles').disabled = selectedTargets.size === 0;
+        // Trigger render ulang pencarian
+        el('searchInput').dispatchEvent(new Event('input'));
+    }
+
+    // 5. Konversi File ke Base64 dan Kirim
+    const fileToBase64 = file => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve({ name: file.name, data: reader.result });
+        reader.onerror = error => reject(error);
+    });
+
+    el('btnSendFiles').addEventListener('click', async () => {
+        el('btnSendFiles').disabled = true;
+        el('btnSendFiles').innerText = 'Mengirim...';
+        
+        const filesData = await Promise.all(selectedFiles.map(fileToBase64));
+        
+        await fetch(SERVER_URL + '/send', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                senderId: userProfile.id,
+                senderName: userProfile.username,
+                targets: Array.from(selectedTargets),
+                files: filesData
+            })
+        });
+
+        alert('File berhasil dikirim!');
+        selectedFiles = []; renderFileTiles();
+        selectedTargets.clear(); el('targetCount').innerText = 0;
+        changeView('view-home');
+        el('btnSendFiles').innerText = 'Kirim File!';
+    });
+
+    // 6. Logika Inbox
+    async function loadInbox() {
+        const res = await fetch(`${SERVER_URL}/inbox/${userProfile.id}`);
+        const inboxes = await res.json();
+        
+        const container = el('inboxList');
+        container.innerHTML = inboxes.length === 0 ? '<p>Inbox kosong.</p>' : '';
+        
+        inboxes.forEach(msg => {
+            const div = document.createElement('div');
+            div.className = 'inbox-item';
+            
+            let actionHtml = '';
+            let filesHtml = '';
+
+            if (msg.status === 'unread') {
+                actionHtml = `
+                    <button onclick="handleInboxAction('${msg.msgId}', 'accept')">Terima</button>
+                    <button style="background:red;" onclick="handleInboxAction('${msg.msgId}', 'reject')">Tolak</button>
+                `;
+            } else {
+                filesHtml = `<div class="dropdown" style="display:block;">
+                    ${msg.files.map(f => `<a class="file-link" href="${f.data}" download="${f.name}">📄 ${f.name} (Klik untuk Download)</a>`).join('')}
+                </div>`;
+            }
+
+            div.innerHTML = `
+                <p>Pengirim: <b>${msg.senderName}</b> <small>(${msg.senderId})</small></p>
+                <p>Status: <i>${msg.status}</i></p>
+                ${actionHtml}
+                ${filesHtml}
+            `;
+            container.appendChild(div);
+        });
+    }
+
+    window.handleInboxAction = async (msgId, action) => {
+        await fetch(SERVER_URL + '/inbox-action', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: userProfile.id, msgId, action })
+        });
+        loadInbox(); // Reload inbox setelah aksi
+    };
+</script>
+</body>
+</html>
